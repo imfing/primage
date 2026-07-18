@@ -39,9 +39,16 @@ image-webp = "0.2"
 # Library only (skip oxipng's own CLI deps); keep rayon parallelism + zopfli.
 oxipng = { version = "10", default-features = false, features = ["parallel", "zopfli"] }
 mozjpeg = { version = "0.10", optional = true }
-ravif = { version = "0.13", optional = true }
 rayon = "1"
 webp = { version = "0.3", optional = true }
+
+[target.'cfg(not(all(target_os = "windows", target_arch = "aarch64")))'.dependencies]
+ravif = { version = "0.13", optional = true }
+
+[target.'cfg(all(target_os = "windows", target_arch = "aarch64"))'.dependencies]
+# MSVC cannot compile rav1e's GNU-style ARM assembly. Keep AVIF support using
+# rav1e's portable Rust implementation instead.
+ravif = { version = "0.13", optional = true, default-features = false, features = ["threading"] }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["termios"] }

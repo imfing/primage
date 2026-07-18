@@ -105,7 +105,9 @@ fn encode_jpeg(img: &RgbaImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
     let mut started = comp
         .start_compress(Vec::new())
         .context("mozjpeg: failed to start compressor")?;
-    started.write_scanlines(&rgb).context("mozjpeg: encode failed")?;
+    started
+        .write_scanlines(&rgb)
+        .context("mozjpeg: encode failed")?;
     started.finish().context("mozjpeg: finish failed")
 }
 
@@ -118,8 +120,12 @@ fn encode_jpeg(img: &RgbaImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
     let rgb = flatten_alpha(img);
 
     let mut out = Vec::new();
-    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality)
-        .write_image(&rgb, img.width(), img.height(), ExtendedColorType::Rgb8)?;
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality).write_image(
+        &rgb,
+        img.width(),
+        img.height(),
+        ExtendedColorType::Rgb8,
+    )?;
     Ok(out)
 }
 
@@ -145,7 +151,12 @@ fn encode_png(img: &RgbaImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
 
     let mut raw = Vec::new();
     PngEncoder::new_with_quality(&mut raw, CompressionType::Fast, FilterType::Adaptive)
-        .write_image(img.as_raw(), img.width(), img.height(), ExtendedColorType::Rgba8)?;
+        .write_image(
+            img.as_raw(),
+            img.width(),
+            img.height(),
+            ExtendedColorType::Rgba8,
+        )?;
 
     let mut options = oxipng::Options::from_preset(opts.png_level);
     options.interlace = Some(opts.png_interlace);
@@ -171,13 +182,16 @@ fn encode_webp(img: &RgbaImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
 #[cfg(not(feature = "libwebp"))]
 fn encode_webp(img: &RgbaImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
     if !opts.lossless {
-        eprintln!(
-            "warning: lossy WebP requires the `libwebp` feature; encoding lossless instead"
-        );
+        eprintln!("warning: lossy WebP requires the `libwebp` feature; encoding lossless instead");
     }
     let mut out = Vec::new();
     image_webp::WebPEncoder::new(&mut out)
-        .encode(img.as_raw(), img.width(), img.height(), image_webp::ColorType::Rgba8)
+        .encode(
+            img.as_raw(),
+            img.width(),
+            img.height(),
+            image_webp::ColorType::Rgba8,
+        )
         .context("WebP encode failed")?;
     Ok(out)
 }
@@ -217,8 +231,12 @@ fn encode_avif(_: &RgbaImage, _: &EncodeOptions) -> Result<Vec<u8>> {
 /// QOI — no options, it's always "lossless + fast".
 fn encode_qoi(img: &RgbaImage) -> Result<Vec<u8>> {
     let mut out = Vec::new();
-    image::codecs::qoi::QoiEncoder::new(&mut out)
-        .write_image(img.as_raw(), img.width(), img.height(), ExtendedColorType::Rgba8)?;
+    image::codecs::qoi::QoiEncoder::new(&mut out).write_image(
+        img.as_raw(),
+        img.width(),
+        img.height(),
+        ExtendedColorType::Rgba8,
+    )?;
     Ok(out)
 }
 

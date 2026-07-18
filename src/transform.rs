@@ -65,7 +65,10 @@ mod tests {
 
     #[test]
     fn resolve_dims() {
-        assert_eq!(resolve_dimensions(1920, 1080, Some(960), Some(540)), (960, 540));
+        assert_eq!(
+            resolve_dimensions(1920, 1080, Some(960), Some(540)),
+            (960, 540)
+        );
         assert_eq!(resolve_dimensions(1920, 1080, Some(960), None), (960, 540));
         assert_eq!(resolve_dimensions(1920, 1080, None, Some(540)), (960, 540));
         assert_eq!(resolve_dimensions(100, 100, None, None), (100, 100));

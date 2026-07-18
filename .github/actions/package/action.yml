@@ -1,0 +1,30 @@
+name: Package archive
+description: Package a release binary with project metadata.
+
+inputs:
+  target:
+    description: Rust target triple used in the archive name.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Package (unix)
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        name="primage-${{ inputs.target }}"
+        mkdir -p "dist/${name}"
+        cp target/release/primage "dist/${name}/"
+        cp LICENSE README.md "dist/${name}/"
+        tar -C "dist/${name}" -czf "dist/${name}.tar.gz" primage LICENSE README.md
+
+    - name: Package (windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $name = "primage-${{ inputs.target }}"
+        New-Item -ItemType Directory -Force -Path "dist/$name" | Out-Null
+        Copy-Item target/release/primage.exe "dist/$name/"
+        Copy-Item LICENSE,README.md "dist/$name/"
+        Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip"

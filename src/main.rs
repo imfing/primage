@@ -25,6 +25,11 @@ fn main() -> anyhow::Result<()> {
         );
         args.preview = false;
     }
+    let display_config = if args.preview {
+        Some(term::DisplayConfig::detect()?)
+    } else {
+        None
+    };
 
     // Phase 1 (serial): resolve output formats/paths and deduplicate names.
     let mut taken = HashSet::new();
@@ -43,7 +48,13 @@ fn main() -> anyhow::Result<()> {
     // Phase 2 (parallel): decode, transform, encode, write.
     let results: Vec<_> = plans
         .par_iter()
-        .map(|plan| pipeline::run(plan, &args))
+        .map(|plan| {
+            pipeline::run(
+                plan,
+                &args,
+                display_config.map(|config| config.pixel_width()),
+            )
+        })
         .collect();
 
     let mut totals = (0u64, 0u64);

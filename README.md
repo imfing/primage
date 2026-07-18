@@ -72,6 +72,8 @@ primage photo.png -f avif --preview            # convert, then preview the resul
 - `--preview` combined with `-f`/`-o` converts first, then shows the processed image
 
 Preview support is auto-detected from the environment and disabled when stdout isn't a TTY (pipes stay clean).
+primage requires the terminal to report its pixel dimensions so it can prepare
+a native-resolution preview without an additional terminal-side resize.
 
 Input decoding: JPEG, PNG, WebP, GIF, TIFF, BMP, ICO, TGA, PNM, QOI (8-bit RGBA pipeline).
 

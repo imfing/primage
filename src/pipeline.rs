@@ -14,9 +14,6 @@ use crate::cli::Cli;
 use crate::codecs::{self, Format};
 use crate::transform;
 
-/// Longest-side cap for the in-terminal preview copy of an image.
-const PREVIEW_MAX_DIM: u32 = 1200;
-
 /// A fully resolved conversion job. `output`/`format` are `None` in
 /// preview-only mode (nothing is written).
 pub struct Plan {
@@ -93,7 +90,7 @@ pub fn plan(input: &Path, args: &Cli, taken: &mut HashSet<PathBuf>) -> Result<Pl
 }
 
 /// Execute a plan: decode, preprocess, encode, write.
-pub fn run(plan: &Plan, args: &Cli) -> Result<Report> {
+pub fn run(plan: &Plan, args: &Cli, preview_pixel_width: Option<u32>) -> Result<Report> {
     let input_size = std::fs::metadata(&plan.input)
         .with_context(|| format!("cannot read {}", plan.input.display()))?
         .len();
@@ -145,11 +142,11 @@ pub fn run(plan: &Plan, args: &Cli) -> Result<Report> {
         _ => None,
     };
 
-    // Keep only a small copy for the terminal preview (also bounds memory
-    // for large batches, where reports live until the parallel phase ends).
-    let image = args.preview.then(|| {
-        transform::fit_within(&img, PREVIEW_MAX_DIM, image::imageops::FilterType::Triangle)
-    });
+    // Resize exactly once to the terminal's pixel width. The terminal can then
+    // display the pixels natively instead of resampling a cell-sized placement.
+    let image = preview_pixel_width
+        .filter(|_| args.preview)
+        .map(|width| transform::fit_width(&img, width, image::imageops::FilterType::Lanczos3));
 
     Ok(Report {
         input: plan.input.clone(),

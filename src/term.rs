@@ -3,12 +3,58 @@
 
 use std::io::{IsTerminal, Write};
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use base64::Engine as _;
 use image::{ExtendedColorType, ImageEncoder, RgbaImage};
 
 /// Payload chunk size required by the protocol.
 const CHUNK_SIZE: usize = 4096;
+
+/// Terminal dimensions used to prepare and place previews.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DisplayConfig {
+    pixel_width: u32,
+}
+
+impl DisplayConfig {
+    pub fn detect() -> Result<Self> {
+        Self::from_pixel_size(terminal_pixel_size())
+    }
+
+    fn from_pixel_size(size: Option<(u32, u32)>) -> Result<Self> {
+        let Some((pixel_width, _)) = size else {
+            bail!(
+                "Terminal does not support reporting screen sizes in pixels, \
+                 use a terminal such as kitty, WezTerm, Konsole, etc. that does."
+            );
+        };
+        Ok(Self { pixel_width })
+    }
+
+    pub fn pixel_width(self) -> u32 {
+        self.pixel_width
+    }
+}
+
+#[cfg(any(unix, test))]
+fn valid_pixel_size(width: u16, height: u16) -> Option<(u32, u32)> {
+    if width == 0 || height == 0 {
+        None
+    } else {
+        Some((u32::from(width), u32::from(height)))
+    }
+}
+
+#[cfg(unix)]
+fn terminal_pixel_size() -> Option<(u32, u32)> {
+    let size = rustix::termios::tcgetwinsize(std::io::stdout()).ok()?;
+    valid_pixel_size(size.ws_xpixel, size.ws_ypixel)
+}
+
+#[cfg(not(unix))]
+fn terminal_pixel_size() -> Option<(u32, u32)> {
+    None
+}
 
 /// Heuristic support detection via the environment — terminals known to
 /// implement the Kitty graphics protocol. Never claim support when stdout
@@ -27,13 +73,8 @@ pub fn supports_kitty() -> bool {
         || std::env::var_os("KONSOLE_VERSION").is_some()
 }
 
-/// Render an image in the terminal, scaled to fit.
+/// Render an image in the terminal at its prepared pixel size.
 pub fn display(img: &RgbaImage) -> Result<()> {
-    let (term_cols, term_rows) = terminal_size::terminal_size()
-        .map(|(w, h)| (u32::from(w.0), u32::from(h.0)))
-        .unwrap_or((80, 24));
-    let (cols, rows) = display_cells(img.width(), img.height(), term_cols, term_rows);
-
     // Transmit as PNG (f=100): compact and universally supported.
     let mut png = Vec::new();
     image::codecs::png::PngEncoder::new_with_quality(
@@ -49,46 +90,36 @@ pub fn display(img: &RgbaImage) -> Result<()> {
     )?;
 
     let mut stdout = std::io::stdout().lock();
-    write_kitty(&mut stdout, &png, cols, rows)?;
+    write_kitty(&mut stdout, &png)?;
     stdout.flush()?;
     Ok(())
 }
 
-/// Write the escape sequence: chunked base64, then move the cursor below
-/// the image so subsequent output doesn't overwrite it.
-fn write_kitty<W: Write>(w: &mut W, png: &[u8], cols: u32, rows: u32) -> std::io::Result<()> {
+/// Write the escape sequence using the same cursor behavior as `kitten icat`.
+///
+/// The terminal moves the cursor past the placement when `C` is left at its
+/// default value. Only one trailing newline is needed to put subsequent output
+/// at the start of the next line; emitting one newline per image row would
+/// scroll the image straight out of view in spec-compliant terminals.
+fn write_kitty<W: Write>(w: &mut W, png: &[u8]) -> std::io::Result<()> {
+    w.write_all(b"\r")?;
+
     let b64 = base64::engine::general_purpose::STANDARD.encode(png);
     let chunks = b64.as_bytes().chunks(CHUNK_SIZE);
     let count = chunks.len();
     for (i, chunk) in chunks.enumerate() {
         let more = u8::from(i + 1 < count);
         if i == 0 {
-            // a=T: transmit & display; q=2: suppress terminal responses;
-            // c,r: display area in cells (terminal scales to fit).
-            write!(w, "\x1b_Ga=T,f=100,q=2,c={cols},r={rows},m={more};")?;
+            // No c/r placement size: the image was already prepared at the
+            // terminal's native pixel width and must not be resampled.
+            write!(w, "\x1b_Ga=T,f=100,q=2,m={more};")?;
         } else {
             write!(w, "\x1b_Gm={more};")?;
         }
         w.write_all(chunk)?;
         w.write_all(b"\x1b\\")?;
     }
-    write!(w, "{}", "\n".repeat(rows as usize))
-}
-
-/// Fit (w, h) into (max_cols, max_rows) terminal cells, preserving aspect
-/// ratio. A character cell is roughly twice as tall as it is wide.
-fn display_cells(w: u32, h: u32, max_cols: u32, max_rows: u32) -> (u32, u32) {
-    let cols = max_cols.max(1);
-    let rows = (f64::from(cols) * f64::from(h) / (2.0 * f64::from(w))).ceil() as u32;
-    if rows <= max_rows.max(1) {
-        (cols, rows.max(1))
-    } else {
-        let rows = max_rows.max(1);
-        let cols = (2.0 * f64::from(rows) * f64::from(w) / f64::from(h))
-            .ceil()
-            .min(f64::from(max_cols.max(1))) as u32;
-        (cols.max(1), rows)
-    }
+    w.write_all(b"\n")
 }
 
 #[cfg(test)]
@@ -96,42 +127,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fit_wide_image() {
-        // 2:1 image in 80x24 terminal: full width, 20 rows.
-        assert_eq!(display_cells(2000, 1000, 80, 24), (80, 20));
+    fn pixel_size_must_include_both_dimensions() {
+        assert_eq!(valid_pixel_size(1200, 800), Some((1200, 800)));
+        assert_eq!(valid_pixel_size(0, 800), None);
+        assert_eq!(valid_pixel_size(1200, 0), None);
     }
 
     #[test]
-    fn fit_tall_image() {
-        // 1:2 image in 80x24 terminal: capped to 24 rows, 24 cols.
-        assert_eq!(display_cells(1000, 2000, 80, 24), (24, 24));
-    }
-
-    #[test]
-    fn never_zero() {
-        let (c, r) = display_cells(1, 10000, 80, 24);
-        assert!(c >= 1 && r >= 1);
+    fn missing_pixel_size_has_icat_style_error() {
+        let error = DisplayConfig::from_pixel_size(None).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Terminal does not support reporting screen sizes in pixels, \
+             use a terminal such as kitty, WezTerm, Konsole, etc. that does."
+        );
     }
 
     #[test]
     fn small_payload_is_single_chunk() {
         let mut out = Vec::new();
-        write_kitty(&mut out, b"abc", 80, 20).unwrap();
+        write_kitty(&mut out, b"abc").unwrap();
         let s = String::from_utf8(out).unwrap();
-        assert!(s.starts_with("\x1b_Ga=T,f=100,q=2,c=80,r=20,m=0;YWJj\x1b\\"));
-        assert!(s.ends_with(&"\n".repeat(20)));
+        assert_eq!(s, "\r\x1b_Ga=T,f=100,q=2,m=0;YWJj\x1b\\\n");
+        assert!(!s.contains(",c="));
+        assert!(!s.contains(",r="));
     }
 
     #[test]
     fn large_payload_is_chunked() {
         let png = vec![0u8; 10_000]; // ~13.3k base64 chars → 4 chunks
         let mut out = Vec::new();
-        write_kitty(&mut out, &png, 10, 5).unwrap();
+        write_kitty(&mut out, &png).unwrap();
         let s = String::from_utf8(out).unwrap();
-        assert!(s.starts_with("\x1b_Ga=T,f=100,q=2,c=10,r=5,m=1;"));
+        assert!(s.starts_with("\r\x1b_Ga=T,f=100,q=2,m=1;"));
         let chunks: Vec<_> = s.split("\x1b\\").collect();
         assert_eq!(chunks.len() - 1, 4); // 4 escape sequences
         assert!(chunks[3].ends_with("m=0;AAA") || chunks[3].contains("m=0;"));
         assert!(!chunks[1].contains("a=T")); // only the first chunk carries control data
+        assert_eq!(s.chars().filter(|&c| c == '\n').count(), 1);
     }
 }

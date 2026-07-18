@@ -40,6 +40,15 @@ pub fn fit_within(img: &RgbaImage, max: u32, filter: imageops::FilterType) -> Rg
     imageops::resize(img, nw, nh, filter)
 }
 
+/// Shrink to a maximum width, preserving aspect ratio. No-op if it fits.
+pub fn fit_width(img: &RgbaImage, max_width: u32, filter: imageops::FilterType) -> RgbaImage {
+    let max_width = max_width.max(1);
+    if img.width() <= max_width {
+        return img.clone();
+    }
+    resize(img, Some(max_width), None, filter)
+}
+
 /// Resolve target dimensions, preserving aspect ratio when one side is unset.
 fn resolve_dimensions(
     orig_w: u32,
@@ -61,7 +70,9 @@ fn resolve_dimensions(
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_dimensions;
+    use image::{imageops, RgbaImage};
+
+    use super::{fit_width, resolve_dimensions};
 
     #[test]
     fn resolve_dims() {
@@ -75,5 +86,16 @@ mod tests {
         // Odd aspect ratios round to nearest and never hit zero.
         assert_eq!(resolve_dimensions(3, 1, Some(1), None), (1, 1));
         assert_eq!(resolve_dimensions(4000, 3, Some(1000), None), (1000, 1));
+    }
+
+    #[test]
+    fn fit_width_shrinks_without_upscaling() {
+        let wide = RgbaImage::new(3230, 2124);
+        let fitted = fit_width(&wide, 1200, imageops::FilterType::Nearest);
+        assert_eq!(fitted.dimensions(), (1200, 789));
+
+        let small = RgbaImage::new(320, 200);
+        let fitted = fit_width(&small, 1200, imageops::FilterType::Nearest);
+        assert_eq!(fitted.dimensions(), (320, 200));
     }
 }

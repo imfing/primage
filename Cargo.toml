@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "A fast CLI for compressing and converting images (JPEG, PNG, WebP, AVIF, QOI)"
 license = "Apache-2.0"
-repository = "https://github.com/imfing/squoosh-cli"
+repository = "https://github.com/imfing/primage"
 keywords = ["image", "compression", "avif", "webp", "oxipng"]
 categories = ["command-line-utilities", "multimedia::images"]
 

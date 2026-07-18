@@ -177,32 +177,32 @@ jobs:
             on_macos do
               on_arm do
                 sha256 "${sha_darwin_arm}"
-                url "https://github.com/imfing/squoosh-cli/releases/download/v#{version}/primage-aarch64-apple-darwin.tar.gz",
-                    verified: "github.com/imfing/squoosh-cli/"
+                url "https://github.com/imfing/primage/releases/download/v#{version}/primage-aarch64-apple-darwin.tar.gz",
+                    verified: "github.com/imfing/primage/"
               end
               on_intel do
                 sha256 "${sha_darwin_intel}"
-                url "https://github.com/imfing/squoosh-cli/releases/download/v#{version}/primage-x86_64-apple-darwin.tar.gz",
-                    verified: "github.com/imfing/squoosh-cli/"
+                url "https://github.com/imfing/primage/releases/download/v#{version}/primage-x86_64-apple-darwin.tar.gz",
+                    verified: "github.com/imfing/primage/"
               end
             end
 
             on_linux do
               on_arm do
                 sha256 "${sha_linux_arm}"
-                url "https://github.com/imfing/squoosh-cli/releases/download/v#{version}/primage-aarch64-unknown-linux-gnu.tar.gz",
-                    verified: "github.com/imfing/squoosh-cli/"
+                url "https://github.com/imfing/primage/releases/download/v#{version}/primage-aarch64-unknown-linux-gnu.tar.gz",
+                    verified: "github.com/imfing/primage/"
               end
               on_intel do
                 sha256 "${sha_linux_intel}"
-                url "https://github.com/imfing/squoosh-cli/releases/download/v#{version}/primage-x86_64-unknown-linux-gnu.tar.gz",
-                    verified: "github.com/imfing/squoosh-cli/"
+                url "https://github.com/imfing/primage/releases/download/v#{version}/primage-x86_64-unknown-linux-gnu.tar.gz",
+                    verified: "github.com/imfing/primage/"
               end
             end
 
             name "primage"
             desc "A fast CLI for compressing and converting images"
-            homepage "https://github.com/imfing/squoosh-cli"
+            homepage "https://github.com/imfing/primage"
 
             binary "primage"
 

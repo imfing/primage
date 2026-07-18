@@ -70,7 +70,7 @@ primage [OPTIONS] <INPUT>...
     --png-interlace        Adam7 interlacing
     --avif-speed <0-10>    AVIF encoder speed (default: 6)
 -s, --suffix <SUFFIX>      Suffix for generated names, e.g. -s .min
-    --overwrite            Allow overwriting the input file
+    --overwrite            Allow overwriting an existing output file
     --preview              Display the image in the terminal (Kitty protocol)
 -v, --verbose...           Show processing details; repeat for stage timings
 ```
@@ -79,6 +79,11 @@ Input decoding supports JPEG, PNG, WebP, GIF, TIFF, BMP, ICO, TGA, PNM and QOI
 through an 8-bit RGBA pipeline. EXIF orientation is applied before requested
 rotation and resizing. Use `-v` for processing details or `-vv` to include
 decode, transform, encode and write timings.
+
+Without `-o`, naming collisions append a number to the full stem:
+`photo.jpg` becomes `photo1.jpg`, and `photo.min.jpg` becomes
+`photo.min1.jpg`. An explicit `-o FILE` errors if it already exists unless
+`--overwrite` is set.
 
 ## Terminal previews
 

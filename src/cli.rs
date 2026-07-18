@@ -71,7 +71,7 @@ pub struct Cli {
     #[arg(short, long, default_value = "")]
     pub suffix: String,
 
-    /// Allow overwriting the input file
+    /// Allow overwriting an existing output file
     #[arg(long)]
     pub overwrite: bool,
 

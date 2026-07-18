@@ -378,8 +378,12 @@ fn resolve_format(input: &Path, args: &Cli) -> Result<Format> {
     )
 }
 
-/// Compute the output path for one input, deduplicating names generated
-/// within this run (e.g. `a.png` and `a.webp` both mapping to `a.jpg`).
+/// Compute the output path for one input.
+///
+/// Implicit names use the preferred `stem + suffix + extension`, then append
+/// `1`, `2`, ... to the complete stem when that path conflicts with an input,
+/// an existing file, or another output planned in this batch. An explicit
+/// output file is never renamed and requires `--overwrite` if it exists.
 fn resolve_output_path(
     input: &Path,
     args: &Cli,
@@ -391,37 +395,54 @@ fn resolve_output_path(
         .with_context(|| format!("invalid file name: {}", input.display()))?
         .to_string_lossy();
     let ext = format.extension();
-    let default_same_format_number = args.output.is_none()
-        && args.suffix.is_empty()
-        && !args.overwrite
-        && Format::from_path(input) == Some(format);
-    let auto_name = |n: Option<u32>| {
-        if default_same_format_number {
-            return format!("{stem}{}.{ext}", n.unwrap_or(1));
-        }
-        let counter = n.map(|n| format!("-{n}")).unwrap_or_default();
-        format!("{stem}{}{counter}.{ext}", args.suffix)
+    let base = format!("{stem}{}", args.suffix);
+    let auto_name = |number: Option<u32>| {
+        let number = number.map(|number| number.to_string()).unwrap_or_default();
+        format!("{base}{number}.{ext}")
     };
 
-    let generated_name = match &args.output {
-        Some(out) => args.inputs.len() > 1 || out.is_dir(),
-        None => true,
-    };
-    let mut candidate = match &args.output {
-        // Multiple inputs, or an existing directory: treat -o as a directory.
-        Some(out) if args.inputs.len() > 1 || out.is_dir() => out.join(auto_name(None)),
-        Some(out) => out.clone(),
-        None => input.with_file_name(auto_name(None)),
-    };
-    let mut n = 2;
-    while taken.contains(&candidate) || (generated_name && candidate.exists()) {
-        candidate = match &args.output {
-            Some(out) if args.inputs.len() > 1 || out.is_dir() => out.join(auto_name(Some(n))),
-            Some(out) => out.with_file_name(auto_name(Some(n))),
-            None => input.with_file_name(auto_name(Some(n))),
-        };
-        n += 1;
+    let output_directory = args
+        .output
+        .as_ref()
+        .filter(|out| args.inputs.len() > 1 || out.is_dir());
+
+    // A single explicit output file represents an exact user choice. Do not
+    // silently replace it or invent a different name.
+    if let Some(output) = args.output.as_ref().filter(|_| output_directory.is_none()) {
+        if taken.contains(output) {
+            bail!("output path is used more than once: {}", output.display());
+        }
+        if output.exists() && !args.overwrite {
+            bail!(
+                "output already exists: {}; pass --overwrite to replace it",
+                output.display()
+            );
+        }
+        taken.insert(output.clone());
+        return Ok(output.clone());
     }
+
+    let path_for = |number: Option<u32>| match output_directory {
+        Some(directory) => directory.join(auto_name(number)),
+        None => input.with_file_name(auto_name(number)),
+    };
+    let conflicts = |candidate: &Path| {
+        let other_input = args
+            .inputs
+            .iter()
+            .any(|other| other != input && other == candidate);
+        taken.contains(candidate)
+            || other_input
+            || (!args.overwrite && (candidate == input || candidate.exists()))
+    };
+
+    let mut candidate = path_for(None);
+    let mut number = 1;
+    while conflicts(&candidate) {
+        candidate = path_for(Some(number));
+        number += 1;
+    }
+
     taken.insert(candidate.clone());
     Ok(candidate)
 }
@@ -448,6 +469,28 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static TEMP_FILE_ID: AtomicUsize = AtomicUsize::new(0);
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(label: &str) -> Self {
+            let id = TEMP_FILE_ID.fetch_add(1, Ordering::Relaxed);
+            let path =
+                std::env::temp_dir().join(format!("primage-{label}-{}-{id}", std::process::id()));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self, name: &str) -> PathBuf {
+            self.0.join(name)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
 
     struct TempJpeg(PathBuf);
 
@@ -543,6 +586,99 @@ mod tests {
         let mut taken = HashSet::from([PathBuf::from("photo1.jpg")]);
         let plan = plan(Path::new("photo.jpg"), &args, &mut taken).unwrap();
         assert_eq!(plan.output.as_deref(), Some(Path::new("photo2.jpg")));
+    }
+
+    #[test]
+    fn cross_format_conversion_uses_the_plain_stem_when_available() {
+        let args = args(&["primage", "photo.png", "--format", "jpeg"]);
+        let plan = plan(Path::new("photo.png"), &args, &mut HashSet::new()).unwrap();
+        assert_eq!(plan.output.as_deref(), Some(Path::new("photo.jpg")));
+    }
+
+    #[test]
+    fn cross_format_file_collisions_append_a_number_to_the_stem() {
+        let dir = TempDir::new("cross-format-collision");
+        let input = dir.path("photo.png");
+        std::fs::write(dir.path("photo.jpg"), []).unwrap();
+        std::fs::write(dir.path("photo1.jpg"), []).unwrap();
+
+        let args = args(&["primage", input.to_str().unwrap(), "--format", "jpeg"]);
+        let plan = plan(&input, &args, &mut HashSet::new()).unwrap();
+        assert_eq!(plan.output, Some(dir.path("photo2.jpg")));
+    }
+
+    #[test]
+    fn suffix_file_collisions_append_a_number_after_the_suffix() {
+        let dir = TempDir::new("suffix-collision");
+        let input = dir.path("photo.jpg");
+        std::fs::write(dir.path("photo.min.jpg"), []).unwrap();
+
+        let args = args(&["primage", input.to_str().unwrap(), "--suffix", ".min"]);
+        let plan = plan(&input, &args, &mut HashSet::new()).unwrap();
+        assert_eq!(plan.output, Some(dir.path("photo.min1.jpg")));
+    }
+
+    #[test]
+    fn duplicate_batch_names_are_numbered_consistently() {
+        let dir = TempDir::new("batch-collision");
+        let first = dir.path("first/photo.png");
+        let second = dir.path("second/photo.png");
+        let output = dir.path("output");
+        let args = args(&[
+            "primage",
+            first.to_str().unwrap(),
+            second.to_str().unwrap(),
+            "--format",
+            "jpeg",
+            "--output",
+            output.to_str().unwrap(),
+        ]);
+        let mut taken = HashSet::new();
+
+        let first_plan = plan(&first, &args, &mut taken).unwrap();
+        let second_plan = plan(&second, &args, &mut taken).unwrap();
+
+        assert_eq!(first_plan.output, Some(output.join("photo.jpg")));
+        assert_eq!(second_plan.output, Some(output.join("photo1.jpg")));
+    }
+
+    #[test]
+    fn explicit_existing_output_requires_overwrite() {
+        let dir = TempDir::new("explicit-collision");
+        let input = dir.path("photo.png");
+        let output = dir.path("result.jpg");
+        std::fs::write(&output, []).unwrap();
+        let args = args(&[
+            "primage",
+            input.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+        ]);
+
+        let error = match plan(&input, &args, &mut HashSet::new()) {
+            Ok(_) => panic!("existing explicit output should require --overwrite"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("output already exists"));
+        assert!(error.to_string().contains("--overwrite"));
+    }
+
+    #[test]
+    fn overwrite_keeps_an_explicit_existing_output() {
+        let dir = TempDir::new("explicit-overwrite");
+        let input = dir.path("photo.png");
+        let output = dir.path("result.jpg");
+        std::fs::write(&output, []).unwrap();
+        let args = args(&[
+            "primage",
+            input.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+            "--overwrite",
+        ]);
+
+        let plan = plan(&input, &args, &mut HashSet::new()).unwrap();
+        assert_eq!(plan.output, Some(output));
     }
 
     #[test]

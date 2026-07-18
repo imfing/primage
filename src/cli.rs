@@ -69,6 +69,19 @@ pub struct Cli {
     /// Allow overwriting the input file
     #[arg(long)]
     pub overwrite: bool,
+
+    /// Display the image in the terminal (Kitty graphics protocol).
+    /// With no output options, previews without writing any file.
+    #[arg(long)]
+    pub preview: bool,
+}
+
+impl Cli {
+    /// True when --preview is used without any output options: show the
+    /// image instead of writing a file.
+    pub fn preview_only(&self) -> bool {
+        self.preview && self.output.is_none() && self.format.is_none() && self.suffix.is_empty()
+    }
 }
 
 /// Resize geometry: `WxH`, `Wx` (auto height) or `xH` (auto width).

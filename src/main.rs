@@ -1,6 +1,7 @@
 mod cli;
 mod codecs;
 mod pipeline;
+mod term;
 mod transform;
 
 use std::collections::HashSet;
@@ -9,7 +10,21 @@ use clap::Parser;
 use rayon::prelude::*;
 
 fn main() -> anyhow::Result<()> {
-    let args = cli::Cli::parse();
+    let mut args = cli::Cli::parse();
+
+    if args.preview && !term::supports_kitty() {
+        if args.preview_only() {
+            anyhow::bail!(
+                "--preview requires a terminal supporting the Kitty graphics protocol \
+                 (e.g. Ghostty, kitty, WezTerm)"
+            );
+        }
+        eprintln!(
+            "warning: terminal doesn't appear to support the Kitty graphics protocol; \
+                   skipping preview"
+        );
+        args.preview = false;
+    }
 
     // Phase 1 (serial): resolve output formats/paths and deduplicate names.
     let mut taken = HashSet::new();
@@ -32,12 +47,21 @@ fn main() -> anyhow::Result<()> {
         .collect();
 
     let mut totals = (0u64, 0u64);
+    let mut converted = 0u32;
     for (plan, result) in plans.iter().zip(results) {
         match result {
             Ok(report) => {
                 totals.0 += report.input_size;
-                totals.1 += report.output_size;
+                if let Some(size) = report.output_size {
+                    totals.1 += size;
+                    converted += 1;
+                }
                 println!("{report}");
+                if let Some(img) = &report.image {
+                    if let Err(e) = term::display(img) {
+                        eprintln!("{}: preview failed: {e:#}", plan.input.display());
+                    }
+                }
             }
             Err(e) => {
                 eprintln!("{}: error: {e:#}", plan.input.display());
@@ -46,7 +70,7 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    if args.inputs.len() > 1 {
+    if args.inputs.len() > 1 && converted > 0 {
         let done = args.inputs.len() as u32 - failures;
         println!(
             "{done} file(s): {} → {}",

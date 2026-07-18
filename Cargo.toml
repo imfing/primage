@@ -21,6 +21,7 @@ libwebp = ["dep:webp"]
 
 [dependencies]
 anyhow = "1"
+base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = [
     "bmp",
@@ -40,6 +41,7 @@ oxipng = { version = "10", default-features = false, features = ["parallel", "zo
 mozjpeg = { version = "0.10", optional = true }
 ravif = { version = "0.13", optional = true }
 rayon = "1"
+terminal_size = "0.4"
 webp = { version = "0.3", optional = true }
 
 [profile.release]

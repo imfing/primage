@@ -14,32 +14,52 @@ use crate::cli::Cli;
 use crate::codecs::{self, Format};
 use crate::transform;
 
-/// A fully resolved conversion job.
+/// Longest-side cap for the in-terminal preview copy of an image.
+const PREVIEW_MAX_DIM: u32 = 1200;
+
+/// A fully resolved conversion job. `output`/`format` are `None` in
+/// preview-only mode (nothing is written).
 pub struct Plan {
     pub input: PathBuf,
-    output: PathBuf,
-    format: Format,
+    output: Option<PathBuf>,
+    format: Option<Format>,
 }
 
 /// Result of processing one input file.
 pub struct Report {
     pub input: PathBuf,
-    pub output: PathBuf,
+    pub output: Option<PathBuf>,
     pub input_size: u64,
-    pub output_size: u64,
+    pub output_size: Option<u64>,
+    /// Original pixel dimensions, after any rotate/resize.
+    pub dimensions: (u32, u32),
+    /// Downscaled copy for terminal display, when --preview is set.
+    pub image: Option<image::RgbaImage>,
 }
 
 impl fmt::Display for Report {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let change = size_change(self.input_size, self.output_size);
-        write!(
-            f,
-            "{} → {}  {} → {}  ({change:+.1}%)",
-            self.input.display(),
-            self.output.display(),
-            human_bytes(self.input_size),
-            human_bytes(self.output_size),
-        )
+        match (&self.output, self.output_size) {
+            (Some(output), Some(output_size)) => {
+                let change = size_change(self.input_size, output_size);
+                write!(
+                    f,
+                    "{} → {}  {} → {}  ({change:+.1}%)",
+                    self.input.display(),
+                    output.display(),
+                    human_bytes(self.input_size),
+                    human_bytes(output_size),
+                )
+            }
+            _ => write!(
+                f,
+                "{}  {}×{}, {}",
+                self.input.display(),
+                self.dimensions.0,
+                self.dimensions.1,
+                human_bytes(self.input_size),
+            ),
+        }
     }
 }
 
@@ -53,6 +73,13 @@ fn size_change(input: u64, output: u64) -> f64 {
 
 /// Resolve the output format and path for one input, without touching the image.
 pub fn plan(input: &Path, args: &Cli, taken: &mut HashSet<PathBuf>) -> Result<Plan> {
+    if args.preview_only() {
+        return Ok(Plan {
+            input: input.to_path_buf(),
+            output: None,
+            format: None,
+        });
+    }
     let format = resolve_format(input, args)?;
     let output = resolve_output_path(input, args, format, taken)?;
     if output == input && !args.overwrite {
@@ -60,8 +87,8 @@ pub fn plan(input: &Path, args: &Cli, taken: &mut HashSet<PathBuf>) -> Result<Pl
     }
     Ok(Plan {
         input: input.to_path_buf(),
-        output,
-        format,
+        output: Some(output),
+        format: Some(format),
     })
 }
 
@@ -94,27 +121,43 @@ pub fn run(plan: &Plan, args: &Cli) -> Result<Report> {
         (None, None) => img,
     };
 
-    let opts = codecs::EncodeOptions {
-        quality: args.quality,
-        lossless: args.lossless,
-        png_level: args.png_level,
-        png_interlace: args.png_interlace,
-        avif_speed: args.avif_speed,
-    };
-    let bytes = codecs::encode(&img, plan.format, &opts)?;
+    let dimensions = (img.width(), img.height());
 
-    if let Some(parent) = plan.output.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("cannot create {}", parent.display()))?;
-    }
-    std::fs::write(&plan.output, &bytes)
-        .with_context(|| format!("cannot write {}", plan.output.display()))?;
+    let output_size = match (plan.output.as_ref(), plan.format) {
+        (Some(output), Some(format)) => {
+            let opts = codecs::EncodeOptions {
+                quality: args.quality,
+                lossless: args.lossless,
+                png_level: args.png_level,
+                png_interlace: args.png_interlace,
+                avif_speed: args.avif_speed,
+            };
+            let bytes = codecs::encode(&img, format, &opts)?;
+
+            if let Some(parent) = output.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("cannot create {}", parent.display()))?;
+            }
+            std::fs::write(output, &bytes)
+                .with_context(|| format!("cannot write {}", output.display()))?;
+            Some(bytes.len() as u64)
+        }
+        _ => None,
+    };
+
+    // Keep only a small copy for the terminal preview (also bounds memory
+    // for large batches, where reports live until the parallel phase ends).
+    let image = args.preview.then(|| {
+        transform::fit_within(&img, PREVIEW_MAX_DIM, image::imageops::FilterType::Triangle)
+    });
 
     Ok(Report {
         input: plan.input.clone(),
         output: plan.output.clone(),
         input_size,
-        output_size: bytes.len() as u64,
+        output_size,
+        dimensions,
+        image,
     })
 }
 

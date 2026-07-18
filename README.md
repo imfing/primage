@@ -47,6 +47,7 @@ primage [OPTIONS] <INPUT>...
     --avif-speed <0-10>    AVIF encoder speed (default: 6)
 -s, --suffix <SUFFIX>      Suffix for generated names, e.g. -s .min
     --overwrite            Allow overwriting the input file
+    --preview              Display the image in the terminal (Kitty protocol)
 ```
 
 Examples:
@@ -58,7 +59,19 @@ primage *.png -f avif -o out/                  # batch convert, parallel across 
 primage big.tiff --max-size 1600 -f jpg -q 80  # TIFF → resized JPEG
 primage scan.png --rotate 90 -f png --png-level 6
 primage icon.png -f webp --lossless            # lossless WebP
+
+primage --preview photo.png                    # just view, writes nothing
+primage photo.png -f avif --preview            # convert, then preview the result
 ```
+
+## Terminal previews
+
+`--preview` renders images inline via the [Kitty graphics protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/) — supported by **Ghostty**, kitty, WezTerm and Konsole. Handy for checking results without leaving the terminal:
+
+- `primage --preview photo.png` — preview-only mode: decodes, applies any transforms and displays, without writing a file
+- `--preview` combined with `-f`/`-o` converts first, then shows the processed image
+
+Preview support is auto-detected from the environment and disabled when stdout isn't a TTY (pipes stay clean).
 
 Input decoding: JPEG, PNG, WebP, GIF, TIFF, BMP, ICO, TGA, PNM, QOI (8-bit RGBA pipeline).
 

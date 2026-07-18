@@ -12,7 +12,7 @@ available from your terminal and scriptable across whole batches of images.
 
 - Encode JPEG with MozJPEG, optimized PNG with OxiPNG, lossy or lossless WebP,
   AVIF with ravif/rav1e, and QOI.
-- Resize, constrain dimensions and rotate before encoding.
+- Honor EXIF orientation, then resize, constrain dimensions or rotate.
 - Process batches in parallel across CPU cores.
 - Preview images at native terminal pixel resolution with the Kitty graphics
   protocol on supported Unix terminals.
@@ -49,6 +49,7 @@ Prebuilt binaries for macOS, Linux and Windows are available from the
 | Convert to AVIF | `primage hero.png -f avif -q 50 --avif-speed 6 -o hero.avif` |
 | Optimize a PNG | `primage screenshot.png --png-level 6` |
 | Rotate and resize | `primage portrait.jpg --rotate 90 --max-size 1600 -q 80 -o portrait-fixed.jpg` |
+| Show processing details and timings | `primage photo.jpg -q 75 -vv` |
 | Preview in the terminal | `primage --preview photo.jpg` |
 | Preview the compressed result | `primage photo.jpg -q 40 --preview` |
 
@@ -71,10 +72,13 @@ primage [OPTIONS] <INPUT>...
 -s, --suffix <SUFFIX>      Suffix for generated names, e.g. -s .min
     --overwrite            Allow overwriting the input file
     --preview              Display the image in the terminal (Kitty protocol)
+-v, --verbose...           Show processing details; repeat for stage timings
 ```
 
 Input decoding supports JPEG, PNG, WebP, GIF, TIFF, BMP, ICO, TGA, PNM and QOI
-through an 8-bit RGBA pipeline.
+through an 8-bit RGBA pipeline. EXIF orientation is applied before requested
+rotation and resizing. Use `-v` for processing details or `-vv` to include
+decode, transform, encode and write timings.
 
 ## Terminal previews
 
@@ -141,4 +145,4 @@ the same operating system and architecture without installing codec libraries.
 
 ## License
 
-Licensed under the [Apache License, Version 2.0](LICENSE).
+[Apache License 2.0](LICENSE).

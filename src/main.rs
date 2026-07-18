@@ -67,7 +67,7 @@ fn main() -> anyhow::Result<()> {
                     totals.1 += size;
                     converted += 1;
                 }
-                println!("{report}");
+                println!("{}", report.format_with_verbosity(args.verbose));
                 if let Some(warning) = report.preview_warning {
                     eprintln!("{}: warning: {warning}", plan.input.display());
                 }

@@ -79,6 +79,10 @@ pub struct Cli {
     /// With no output options, previews without writing any file.
     #[arg(long)]
     pub preview: bool,
+
+    /// Show processing details; repeat for stage timings
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    pub verbose: u8,
 }
 
 impl Cli {
@@ -217,5 +221,11 @@ mod tests {
         let png_level =
             Cli::try_parse_from(["primage", "photo.png", "--preview", "--png-level", "4"]).unwrap();
         assert!(!png_level.preview_only());
+    }
+
+    #[test]
+    fn verbose_flag_counts_occurrences() {
+        let args = Cli::try_parse_from(["primage", "photo.jpg", "-vv"]).unwrap();
+        assert_eq!(args.verbose, 2);
     }
 }

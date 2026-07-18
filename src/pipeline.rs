@@ -4,11 +4,13 @@
 //! resolution and deduplication) and then executed in parallel with rayon.
 
 use std::collections::HashSet;
-use std::fmt;
+use std::fmt::{self, Write as _};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use image::ImageReader;
+use image::metadata::Orientation;
+use image::{DynamicImage, ImageDecoder, ImageReader};
 
 use crate::cli::Cli;
 use crate::codecs::{self, Format};
@@ -34,6 +36,22 @@ pub struct Report {
     pub image: Option<image::RgbaImage>,
     /// Explanation when an encoded output cannot be previewed.
     pub preview_warning: Option<&'static str>,
+    input_format: String,
+    source_dimensions: (u32, u32),
+    oriented_dimensions: (u32, u32),
+    orientation: Orientation,
+    transforms: Vec<String>,
+    encoder: Option<String>,
+    timings: StageTimings,
+}
+
+#[derive(Default)]
+struct StageTimings {
+    decode: Duration,
+    transform: Duration,
+    encode: Duration,
+    write: Duration,
+    total: Duration,
 }
 
 impl fmt::Display for Report {
@@ -59,6 +77,50 @@ impl fmt::Display for Report {
                 human_bytes(self.input_size),
             ),
         }
+    }
+}
+
+impl Report {
+    pub fn format_with_verbosity(&self, verbosity: u8) -> String {
+        if verbosity == 0 {
+            return self.to_string();
+        }
+
+        let mut output = self.to_string();
+        let _ = write!(
+            output,
+            "\n  input: {}, {}×{}",
+            self.input_format, self.source_dimensions.0, self.source_dimensions.1
+        );
+
+        if self.orientation != Orientation::NoTransforms {
+            let orientation = orientation_description(self.orientation);
+            let _ = write!(
+                output,
+                "\n  orientation: {orientation} → {}×{}",
+                self.oriented_dimensions.0, self.oriented_dimensions.1
+            );
+        }
+
+        for transform in &self.transforms {
+            let _ = write!(output, "\n  transform: {transform}");
+        }
+        if let Some(encoder) = &self.encoder {
+            let _ = write!(output, "\n  encoder: {encoder}");
+        }
+
+        if verbosity >= 2 {
+            let _ = write!(
+                output,
+                "\n  timing: decode {}, transform {}, encode {}, write {}, total {}",
+                format_duration(self.timings.decode),
+                format_duration(self.timings.transform),
+                format_duration(self.timings.encode),
+                format_duration(self.timings.write),
+                format_duration(self.timings.total),
+            );
+        }
+        output
     }
 }
 
@@ -93,36 +155,86 @@ pub fn plan(input: &Path, args: &Cli, taken: &mut HashSet<PathBuf>) -> Result<Pl
 
 /// Execute a plan: decode, preprocess, encode, write.
 pub fn run(plan: &Plan, args: &Cli, preview_pixel_width: Option<u32>) -> Result<Report> {
+    let total_started = Instant::now();
     let input_size = std::fs::metadata(&plan.input)
         .with_context(|| format!("cannot read {}", plan.input.display()))?
         .len();
 
-    let img = ImageReader::open(&plan.input)
+    let decode_started = Instant::now();
+    let reader = ImageReader::open(&plan.input)
         .with_context(|| format!("cannot open {}", plan.input.display()))?
-        .with_guessed_format()?
-        .decode()
-        .with_context(|| format!("failed to decode {}", plan.input.display()))?
-        .to_rgba8();
+        .with_guessed_format()?;
+    let input_format = reader
+        .format()
+        .map(|format| format!("{format:?}").to_uppercase())
+        .unwrap_or_else(|| "UNKNOWN".to_string());
+    let mut decoder = reader
+        .into_decoder()
+        .with_context(|| format!("cannot create decoder for {}", plan.input.display()))?;
+    let orientation = decoder
+        .orientation()
+        .with_context(|| format!("cannot read orientation from {}", plan.input.display()))?;
+    let source_dimensions = decoder.dimensions();
+    let mut decoded = DynamicImage::from_decoder(decoder)
+        .with_context(|| format!("failed to decode {}", plan.input.display()))?;
+    let decode_duration = decode_started.elapsed();
+
+    let transform_started = Instant::now();
+    decoded.apply_orientation(orientation);
+    let oriented_dimensions = (decoded.width(), decoded.height());
+    let mut img = decoded.to_rgba8();
+    let mut transforms = Vec::new();
 
     // Preprocessors: rotate, then resize.
-    let img = match args.rotate {
-        Some(rotation) => transform::rotate(&img, rotation),
-        None => img,
-    };
-    let img = match (args.resize, args.max_size) {
-        (Some(geometry), _) => transform::resize(
-            &img,
-            geometry.width,
-            geometry.height,
-            args.resize_filter.into(),
-        ),
-        (None, Some(max)) => transform::fit_within(&img, max, args.resize_filter.into()),
-        (None, None) => img,
-    };
+    if let Some(rotation) = args.rotate {
+        img = transform::rotate(&img, rotation);
+        transforms.push(format!(
+            "rotate {} → {}×{}",
+            rotation_description(rotation),
+            img.width(),
+            img.height()
+        ));
+    }
+    match (args.resize, args.max_size) {
+        (Some(geometry), _) => {
+            let before = img.dimensions();
+            img = transform::resize(
+                &img,
+                geometry.width,
+                geometry.height,
+                args.resize_filter.into(),
+            );
+            transforms.push(format!(
+                "resize {}×{} → {}×{}, {:?}",
+                before.0,
+                before.1,
+                img.width(),
+                img.height(),
+                args.resize_filter
+            ));
+        }
+        (None, Some(max)) => {
+            let before = img.dimensions();
+            img = transform::fit_within(&img, max, args.resize_filter.into());
+            transforms.push(format!(
+                "max-size {max}: {}×{} → {}×{}, {:?}",
+                before.0,
+                before.1,
+                img.width(),
+                img.height(),
+                args.resize_filter
+            ));
+        }
+        (None, None) => {}
+    }
+    let transform_duration = transform_started.elapsed();
 
     let dimensions = (img.width(), img.height());
     let mut encoded_preview = None;
     let mut preview_warning = None;
+    let mut encoder = None;
+    let mut encode_duration = Duration::ZERO;
+    let mut write_duration = Duration::ZERO;
 
     let output_size = match (plan.output.as_ref(), plan.format) {
         (Some(output), Some(format)) => {
@@ -133,7 +245,10 @@ pub fn run(plan: &Plan, args: &Cli, preview_pixel_width: Option<u32>) -> Result<
                 png_interlace: args.png_interlace,
                 avif_speed: args.avif_speed.unwrap_or(6),
             };
+            encoder = Some(opts.describe(format));
+            let encode_started = Instant::now();
             let bytes = codecs::encode(&img, format, &opts)?;
+            encode_duration = encode_started.elapsed();
 
             if args.preview && preview_pixel_width.is_some() {
                 match decode_encoded_preview(&bytes, format)? {
@@ -151,8 +266,10 @@ pub fn run(plan: &Plan, args: &Cli, preview_pixel_width: Option<u32>) -> Result<
                 std::fs::create_dir_all(parent)
                     .with_context(|| format!("cannot create {}", parent.display()))?;
             }
+            let write_started = Instant::now();
             std::fs::write(output, &bytes)
                 .with_context(|| format!("cannot write {}", output.display()))?;
+            write_duration = write_started.elapsed();
             Some(bytes.len() as u64)
         }
         _ => None,
@@ -171,6 +288,14 @@ pub fn run(plan: &Plan, args: &Cli, preview_pixel_width: Option<u32>) -> Result<
                 })
         });
 
+    let timings = StageTimings {
+        decode: decode_duration,
+        transform: transform_duration,
+        encode: encode_duration,
+        write: write_duration,
+        total: total_started.elapsed(),
+    };
+
     Ok(Report {
         input: plan.input.clone(),
         output: plan.output.clone(),
@@ -179,7 +304,43 @@ pub fn run(plan: &Plan, args: &Cli, preview_pixel_width: Option<u32>) -> Result<
         dimensions,
         image,
         preview_warning,
+        input_format,
+        source_dimensions,
+        oriented_dimensions,
+        orientation,
+        transforms,
+        encoder,
+        timings,
     })
+}
+
+fn orientation_description(orientation: Orientation) -> &'static str {
+    match orientation {
+        Orientation::NoTransforms => "none",
+        Orientation::Rotate90 => "rotate 90° clockwise",
+        Orientation::Rotate180 => "rotate 180°",
+        Orientation::Rotate270 => "rotate 270° clockwise",
+        Orientation::FlipHorizontal => "flip horizontally",
+        Orientation::FlipVertical => "flip vertically",
+        Orientation::Rotate90FlipH => "rotate 90° clockwise and flip horizontally",
+        Orientation::Rotate270FlipH => "rotate 270° clockwise and flip horizontally",
+    }
+}
+
+fn rotation_description(rotation: crate::cli::Rotation) -> &'static str {
+    match rotation {
+        crate::cli::Rotation::R90 => "90° clockwise",
+        crate::cli::Rotation::R180 => "180°",
+        crate::cli::Rotation::R270 => "270° clockwise",
+    }
+}
+
+fn format_duration(duration: Duration) -> String {
+    if duration.as_secs() > 0 {
+        format!("{:.2} s", duration.as_secs_f64())
+    } else {
+        format!("{:.1} ms", duration.as_secs_f64() * 1000.0)
+    }
 }
 
 /// Decode the bytes that were actually written so lossy artifacts are visible
@@ -283,7 +444,80 @@ pub fn human_bytes(n: u64) -> String {
 mod tests {
     use super::*;
     use clap::Parser;
-    use image::{Rgba, RgbaImage};
+    use image::{ExtendedColorType, ImageEncoder, RgbImage, Rgba, RgbaImage};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEMP_FILE_ID: AtomicUsize = AtomicUsize::new(0);
+
+    struct TempJpeg(PathBuf);
+
+    impl TempJpeg {
+        fn with_orientation(orientation: u8) -> Self {
+            let image = RgbImage::from_fn(2, 3, |x, y| {
+                image::Rgb([(x * 100) as u8, (y * 80) as u8, 120])
+            });
+            let mut jpeg = Vec::new();
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 95)
+                .write_image(image.as_raw(), 2, 3, ExtendedColorType::Rgb8)
+                .unwrap();
+
+            // JPEG APP1 marker containing a minimal little-endian TIFF IFD with
+            // only the EXIF orientation tag (0x0112).
+            let app1 = [
+                0xff,
+                0xe1,
+                0x00,
+                0x22, // marker length: two length bytes + 32-byte payload
+                b'E',
+                b'x',
+                b'i',
+                b'f',
+                0,
+                0,
+                b'I',
+                b'I',
+                42,
+                0,
+                8,
+                0,
+                0,
+                0, // first IFD offset
+                1,
+                0, // one directory entry
+                0x12,
+                0x01, // orientation tag
+                3,
+                0, // SHORT
+                1,
+                0,
+                0,
+                0, // one value
+                orientation,
+                0,
+                0,
+                0, // value plus padding
+                0,
+                0,
+                0,
+                0, // no next IFD
+            ];
+            jpeg.splice(2..2, app1);
+
+            let id = TEMP_FILE_ID.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "primage-orientation-{}-{id}.jpg",
+                std::process::id()
+            ));
+            std::fs::write(&path, jpeg).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempJpeg {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
 
     fn args(values: &[&str]) -> Cli {
         Cli::try_parse_from(values).unwrap()
@@ -337,5 +571,36 @@ mod tests {
     #[test]
     fn encoded_avif_preview_is_explicitly_unavailable() {
         assert!(decode_encoded_preview(&[], Format::Avif).unwrap().is_none());
+    }
+
+    #[test]
+    fn exif_orientation_is_applied_before_user_transforms() {
+        let input = TempJpeg::with_orientation(6);
+        let input_str = input.0.to_str().unwrap();
+        let args = args(&["primage", input_str, "--preview", "--rotate", "90", "-vv"]);
+        let plan = plan(&input.0, &args, &mut HashSet::new()).unwrap();
+        let report = run(&plan, &args, None).unwrap();
+
+        assert_eq!(report.source_dimensions, (2, 3));
+        assert_eq!(report.dimensions, (2, 3));
+        assert_eq!(report.orientation, Orientation::Rotate90);
+
+        let verbose = report.format_with_verbosity(args.verbose);
+        assert!(verbose.contains("orientation: rotate 90° clockwise → 3×2"));
+        assert!(verbose.contains("transform: rotate 90° clockwise → 2×3"));
+        assert!(verbose.contains("timing: decode"));
+    }
+
+    #[test]
+    fn verbose_output_omits_normal_orientation() {
+        let input = TempJpeg::with_orientation(1);
+        let input_str = input.0.to_str().unwrap();
+        let args = args(&["primage", input_str, "--preview", "-v"]);
+        let plan = plan(&input.0, &args, &mut HashSet::new()).unwrap();
+        let report = run(&plan, &args, None).unwrap();
+
+        assert!(!report
+            .format_with_verbosity(args.verbose)
+            .contains("orientation:"));
     }
 }

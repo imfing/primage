@@ -76,6 +76,53 @@ pub struct EncodeOptions {
     pub avif_speed: u8,
 }
 
+impl EncodeOptions {
+    pub fn describe(&self, format: Format) -> String {
+        match format {
+            Format::Jpeg => {
+                let quality = self.quality.unwrap_or(75);
+                if cfg!(feature = "mozjpeg") {
+                    let subsampling = if quality >= 90 { "4:4:4" } else { "4:2:0" };
+                    format!(
+                        "MozJPEG, quality {quality}, progressive, optimized Huffman, {subsampling}"
+                    )
+                } else {
+                    format!("baseline JPEG, quality {quality}")
+                }
+            }
+            Format::Png => {
+                let interlace = if self.png_interlace {
+                    ", Adam7 interlaced"
+                } else {
+                    ""
+                };
+                format!("OxiPNG, level {}{interlace}", self.png_level)
+            }
+            Format::Webp if self.lossless => {
+                if cfg!(feature = "libwebp") {
+                    "libwebp, lossless".to_string()
+                } else {
+                    "image-webp, lossless".to_string()
+                }
+            }
+            Format::Webp => {
+                let quality = self.quality.unwrap_or(75);
+                if cfg!(feature = "libwebp") {
+                    format!("libwebp, quality {quality}")
+                } else {
+                    "image-webp, lossless fallback".to_string()
+                }
+            }
+            Format::Avif => format!(
+                "ravif/rav1e, quality {}, speed {}",
+                self.quality.unwrap_or(50),
+                self.avif_speed
+            ),
+            Format::Qoi => "QOI, lossless".to_string(),
+        }
+    }
+}
+
 pub fn encode(img: &RgbaImage, format: Format, opts: &EncodeOptions) -> Result<Vec<u8>> {
     match format {
         Format::Jpeg => encode_jpeg(img, opts),

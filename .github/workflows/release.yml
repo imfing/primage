@@ -169,7 +169,9 @@ jobs:
         shell: bash
         run: |
           version="${GITHUB_REF_NAME#v}"
-          status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+          status="$(curl --silent --show-error \
+            --user-agent "primage-release/${version} (https://github.com/${GITHUB_REPOSITORY})" \
+            --output /dev/null --write-out '%{http_code}' \
             "https://crates.io/api/v1/crates/primage/${version}")"
           case "$status" in
             200) echo "published=true" >> "$GITHUB_OUTPUT" ;;

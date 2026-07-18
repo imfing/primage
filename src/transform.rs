@@ -1,4 +1,4 @@
-//! Preprocessors, mirroring Squoosh: rotate and resize.
+//! Preprocessors: rotate and resize.
 
 use image::{imageops, RgbaImage};
 
@@ -23,6 +23,21 @@ pub fn resize(
         return img.clone();
     }
     imageops::resize(img, w, h, filter)
+}
+
+/// Shrink so the longest side is at most `max`, preserving aspect ratio.
+/// No-op if the image already fits.
+pub fn fit_within(img: &RgbaImage, max: u32, filter: imageops::FilterType) -> RgbaImage {
+    let (w, h) = (img.width(), img.height());
+    let scale = f64::from(max) / f64::from(w.max(h));
+    if scale >= 1.0 {
+        return img.clone();
+    }
+    let (nw, nh) = (
+        (w as f64 * scale).round().max(1.0) as u32,
+        (h as f64 * scale).round().max(1.0) as u32,
+    );
+    imageops::resize(img, nw, nh, filter)
 }
 
 /// Resolve target dimensions, preserving aspect ratio when one side is unset.

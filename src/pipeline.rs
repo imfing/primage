@@ -1,4 +1,7 @@
 //! The per-file pipeline: decode → preprocess → encode → write.
+//!
+//! Split into two phases so batches can be planned serially (output-name
+//! resolution and deduplication) and then executed in parallel with rayon.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -10,6 +13,13 @@ use image::ImageReader;
 use crate::cli::Cli;
 use crate::codecs::{self, Format};
 use crate::transform;
+
+/// A fully resolved conversion job.
+pub struct Plan {
+    pub input: PathBuf,
+    output: PathBuf,
+    format: Format,
+}
 
 /// Result of processing one input file.
 pub struct Report {
@@ -41,57 +51,68 @@ fn size_change(input: u64, output: u64) -> f64 {
     (output as f64 / input as f64 - 1.0) * 100.0
 }
 
-pub fn process(input: &Path, args: &Cli, taken: &mut HashSet<PathBuf>) -> Result<Report> {
-    let input_size = std::fs::metadata(input)
-        .with_context(|| format!("cannot read {}", input.display()))?
-        .len();
-
-    let img = ImageReader::open(input)
-        .with_context(|| format!("cannot open {}", input.display()))?
-        .with_guessed_format()?
-        .decode()
-        .with_context(|| format!("failed to decode {}", input.display()))?
-        .to_rgba8();
-
-    // Preprocessors, in Squoosh's order: rotate, then resize.
-    let img = match args.rotate {
-        Some(rotation) => transform::rotate(&img, rotation),
-        None => img,
-    };
-    let img = match args.resize {
-        Some(geometry) => transform::resize(
-            &img,
-            geometry.width,
-            geometry.height,
-            args.resize_filter.into(),
-        ),
-        None => img,
-    };
-
+/// Resolve the output format and path for one input, without touching the image.
+pub fn plan(input: &Path, args: &Cli, taken: &mut HashSet<PathBuf>) -> Result<Plan> {
     let format = resolve_format(input, args)?;
     let output = resolve_output_path(input, args, format, taken)?;
     if output == input && !args.overwrite {
         bail!("output would overwrite the input file; pass --overwrite, --suffix or -o");
     }
+    Ok(Plan {
+        input: input.to_path_buf(),
+        output,
+        format,
+    })
+}
+
+/// Execute a plan: decode, preprocess, encode, write.
+pub fn run(plan: &Plan, args: &Cli) -> Result<Report> {
+    let input_size = std::fs::metadata(&plan.input)
+        .with_context(|| format!("cannot read {}", plan.input.display()))?
+        .len();
+
+    let img = ImageReader::open(&plan.input)
+        .with_context(|| format!("cannot open {}", plan.input.display()))?
+        .with_guessed_format()?
+        .decode()
+        .with_context(|| format!("failed to decode {}", plan.input.display()))?
+        .to_rgba8();
+
+    // Preprocessors: rotate, then resize.
+    let img = match args.rotate {
+        Some(rotation) => transform::rotate(&img, rotation),
+        None => img,
+    };
+    let img = match (args.resize, args.max_size) {
+        (Some(geometry), _) => transform::resize(
+            &img,
+            geometry.width,
+            geometry.height,
+            args.resize_filter.into(),
+        ),
+        (None, Some(max)) => transform::fit_within(&img, max, args.resize_filter.into()),
+        (None, None) => img,
+    };
 
     let opts = codecs::EncodeOptions {
         quality: args.quality,
+        lossless: args.lossless,
         png_level: args.png_level,
         png_interlace: args.png_interlace,
         avif_speed: args.avif_speed,
     };
-    let bytes = codecs::encode(&img, format, &opts)?;
+    let bytes = codecs::encode(&img, plan.format, &opts)?;
 
-    if let Some(parent) = output.parent() {
+    if let Some(parent) = plan.output.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("cannot create {}", parent.display()))?;
     }
-    std::fs::write(&output, &bytes)
-        .with_context(|| format!("cannot write {}", output.display()))?;
+    std::fs::write(&plan.output, &bytes)
+        .with_context(|| format!("cannot write {}", plan.output.display()))?;
 
     Ok(Report {
-        input: input.to_path_buf(),
-        output,
+        input: plan.input.clone(),
+        output: plan.output.clone(),
         input_size,
         output_size: bytes.len() as u64,
     })

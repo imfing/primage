@@ -2,19 +2,22 @@
 name = "primage"
 version = "0.1.0"
 edition = "2021"
-description = "Compress and convert images like Squoosh — as a fast CLI, in pure Rust"
-license = "MIT OR Apache-2.0"
+description = "A fast CLI for compressing and converting images (JPEG, PNG, WebP, AVIF, QOI)"
+license = "Apache-2.0"
 repository = "https://github.com/imfing/squoosh-cli"
 keywords = ["image", "compression", "avif", "webp", "oxipng"]
 categories = ["command-line-utilities", "multimedia::images"]
 
 [features]
-default = ["avif"]
+default = ["avif", "mozjpeg", "libwebp"]
 # AVIF encoding via ravif/rav1e (pure Rust)
 avif = ["dep:ravif"]
-# Real MozJPEG encoder (C library, same as Squoosh) instead of the pure-Rust
-# baseline JPEG encoder. Enables progressive scans + optimized Huffman coding.
+# Real MozJPEG encoder, statically linked: progressive scans + optimized
+# Huffman coding. Without it: pure-Rust baseline JPEG.
 mozjpeg = ["dep:mozjpeg"]
+# Lossy WebP via libwebp, statically linked.
+# Without it: pure-Rust lossless WebP only.
+libwebp = ["dep:webp"]
 
 [dependencies]
 anyhow = "1"
@@ -36,6 +39,8 @@ image-webp = "0.2"
 oxipng = { version = "10", default-features = false, features = ["parallel", "zopfli"] }
 mozjpeg = { version = "0.10", optional = true }
 ravif = { version = "0.13", optional = true }
+rayon = "1"
+webp = { version = "0.3", optional = true }
 
 [profile.release]
 lto = true

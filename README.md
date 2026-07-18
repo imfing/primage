@@ -1,8 +1,8 @@
 # primage
 
-Compress and convert images like [Squoosh](https://github.com/GoogleChromeLabs/squoosh) — as a fast CLI, in pure(ish) Rust.
+A fast CLI for compressing and converting images — JPEG, PNG, WebP, AVIF and QOI. Inspired by [Squoosh](https://github.com/GoogleChromeLabs/squoosh).
 
-Squoosh runs its codecs as WASM inside a browser (or Node). `primage` reimplements the same pipeline with the modern native-Rust codec ecosystem — no V8, no WASM runtime, a single small binary (~4 MB).
+It uses best-in-class codec libraries natively — MozJPEG, libwebp, OxiPNG — plus modern pure-Rust alternatives (ravif/rav1e for AVIF), all statically linked into a single ~5 MB binary with no runtime dependencies.
 
 ```console
 $ primage photo.png -f avif
@@ -19,13 +19,14 @@ cargo install --path .
 
 ### Cargo features
 
-| feature   | default | effect                                                                 |
-|-----------|---------|------------------------------------------------------------------------|
-| `avif`    | ✓       | AVIF encoding via [ravif](https://crates.io/crates/ravif) + rav1e (pure Rust). Disable with `--no-default-features` for a much faster build. |
-| `mozjpeg` | ✗       | Real [MozJPEG](https://crates.io/crates/mozjpeg) (the C library Squoosh uses) — progressive scans + trellis-class optimization, ~40% smaller JPEGs than the pure-Rust baseline encoder. Needs a C compiler. |
+| feature   | default | codec backend |
+|-----------|---------|---------------|
+| `mozjpeg` | ✓ | Real MozJPEG, statically linked. Off → pure-Rust baseline JPEG. |
+| `libwebp` | ✓ | Lossy WebP via libwebp, statically linked. Off → pure-Rust lossless WebP only. |
+| `avif`    | ✓ | AVIF via [ravif](https://crates.io/crates/ravif) + rav1e, 100% pure Rust. Disable for a much faster build. |
 
 ```sh
-cargo build --release --features mozjpeg
+cargo build --release --no-default-features --features avif   # C-free build
 ```
 
 ## Usage
@@ -35,13 +36,15 @@ primage [OPTIONS] <INPUT>...
 
 -o, --output <PATH>        Output file, or directory when processing multiple inputs
 -f, --format <FORMAT>      jpeg | png | webp | avif | qoi   (default: same as input)
--q, --quality <1-100>      Lossy quality (defaults: jpeg=75, avif=50)
+-q, --quality <1-100>      Lossy quality (defaults: jpeg=75, webp=75, avif=50)
+    --lossless             Lossless WebP compression
     --resize <GEOMETRY>    WxH, Wx (auto height), xH (auto width)
+    --max-size <PX>        Shrink so the longest side is at most PX (keeps aspect)
     --rotate <90|180|270>  Rotate before encoding
     --resize-filter <F>    triangle | catrom | gaussian | lanczos3 | nearest
     --png-level <0-6>      OxiPNG effort (default: 2)
     --png-interlace        Adam7 interlacing
-    --avif-speed <0-10>    AVIF speed (default: 6, like Squoosh)
+    --avif-speed <0-10>    AVIF encoder speed (default: 6)
 -s, --suffix <SUFFIX>      Suffix for generated names, e.g. -s .min
     --overwrite            Allow overwriting the input file
 ```
@@ -49,42 +52,34 @@ primage [OPTIONS] <INPUT>...
 Examples:
 
 ```sh
-primage photo.jpg -q 60                        # recompress JPEG in place-style
-primage photo.png -f webp                      # PNG → lossless WebP
-primage *.png -f avif -o out/                  # batch convert into out/
-primage big.tiff --resize 1600x -f jpg -q 80   # TIFF → resized JPEG
+primage photo.jpg -q 60                        # recompress a JPEG
+primage photo.png -f webp                      # PNG → lossy WebP (78 KB from 3.3 MB)
+primage *.png -f avif -o out/                  # batch convert, parallel across cores
+primage big.tiff --max-size 1600 -f jpg -q 80  # TIFF → resized JPEG
 primage scan.png --rotate 90 -f png --png-level 6
+primage icon.png -f webp --lossless            # lossless WebP
 ```
 
-Input decoding: JPEG, PNG, WebP, GIF, TIFF, BMP, ICO, TGA, PNM, QOI (8-bit RGBA pipeline, like Squoosh's `ImageData`).
+Input decoding: JPEG, PNG, WebP, GIF, TIFF, BMP, ICO, TGA, PNM, QOI (8-bit RGBA pipeline).
 
-## Squoosh → primage mapping
+## Codecs
 
-| Squoosh codec | primage backend | notes |
+| Format | Backend | Defaults |
 |---|---|---|
-| MozJPEG | `image` crate baseline JPEG / `mozjpeg` crate (opt-in) | same default quality 75; alpha flattened to white |
-| OxiPNG | [`oxipng`](https://crates.io/crates/oxipng) crate | literally the same code Squoosh compiles to WASM |
-| WebP | [`image-webp`](https://crates.io/crates/image-webp) | **lossless only** — see below |
-| AVIF | [`ravif`](https://crates.io/crates/ravif) (rav1e) | modern pure-Rust replacement for Squoosh's libaom WASM; same defaults (q50, speed 6) |
-| QOI | `image` crate | ✓ |
-| JPEG XL | ✗ | no mature pure-Rust encoder yet ([`jxl-oxide`](https://crates.io/crates/jxl-oxide) is decode-only) |
-| WebP2 | ✗ | format discontinued |
+| JPEG | [`mozjpeg`](https://crates.io/crates/mozjpeg) | q75, progressive, optimized Huffman coding, auto 4:2:0/4:4:4 chroma subsampling |
+| PNG | [`oxipng`](https://crates.io/crates/oxipng) | effort level 2, optional Adam7 interlacing |
+| WebP | libwebp via the [`webp`](https://crates.io/crates/webp) crate | q75 lossy (method 4), or `--lossless` |
+| AVIF | [`ravif`](https://crates.io/crates/ravif) + rav1e (pure Rust) | q50, speed 6 |
+| QOI | [`image`](https://crates.io/crates/image) crate | — |
 
-| Squoosh processor | primage |
-|---|---|
-| Resize (triangle / catrom / lanczos3 / …) | `--resize` + `--resize-filter` (mitchell ≈ gaussian) |
-| Rotate | `--rotate 90/180/270` |
-| Quantize (imagequant) | not yet |
+Not supported yet: JPEG XL (no mature pure-Rust encoder; [`jxl-oxide`](https://crates.io/crates/jxl-oxide) is decode-only), palette quantization.
 
-## How pure-Rust is it?
+## Portability
 
-- Default build: **100% safe Rust codecs** (image-rs ecosystem, zopfli, rav1e), with one exception — `oxipng` internally bundles [libdeflate](https://github.com/ebiggers/libdeflate) (tiny, safe C) for fast deflate trials; the heavy compression is pure-Rust zopfli.
-- `--features mozjpeg` adds the real MozJPEG C library, exactly the codec Squoosh uses. JPEG is the one format where pure Rust still can't compete: mozjpeg's progressive scans + optimized Huffman coding produced **~40% smaller** files in testing.
-- Lossy WebP is the other gap: no pure-Rust VP8 encoder exists yet ([image-webp roadmap](https://github.com/image-rs/image-webp)). WebP output is therefore lossless for now.
+The release binary is self-contained: mozjpeg, libwebp and oxipng's bundled libdeflate are compiled in statically (`otool -L` shows only system libraries), so the binary can be copied and run anywhere on the same OS/arch. JPEG encoding flattens alpha onto white; everything runs on an 8-bit RGBA pipeline.
 
 ## Roadmap
 
-- [ ] Lossy WebP when `image-webp` gains an encoder
 - [ ] JPEG XL decoding via `jxl-oxide`
 - [ ] AVIF decoding when a pure-Rust decoder (e.g. rav1d) matures
 - [ ] Palette quantization via [`imagequant`](https://crates.io/crates/imagequant)
@@ -92,4 +87,4 @@ Input decoding: JPEG, PNG, WebP, GIF, TIFF, BMP, ICO, TGA, PNM, QOI (8-bit RGBA 
 
 ## License
 
-MIT OR Apache-2.0
+Licensed under the [Apache License, Version 2.0](LICENSE).

@@ -7,10 +7,10 @@ use clap::{Parser, ValueEnum};
 
 use crate::codecs::Format;
 
-/// Compress and convert images like Squoosh — no browser required.
+/// Compress and convert images — inspired by Squoosh.
 ///
 /// Decodes JPEG, PNG, WebP, GIF, TIFF, BMP, ICO, TGA, PNM and QOI,
-/// and encodes to JPEG, PNG (OxiPNG), WebP (lossless), AVIF and QOI.
+/// and encodes to JPEG (MozJPEG), PNG (OxiPNG), WebP, AVIF and QOI.
 #[derive(Parser, Debug)]
 #[command(name = "primage", version, about, long_about)]
 pub struct Cli {
@@ -26,13 +26,21 @@ pub struct Cli {
     #[arg(short, long, value_enum, value_name = "FORMAT")]
     pub format: Option<Format>,
 
-    /// Quality for lossy encoders (codec defaults: jpeg=75, avif=50)
+    /// Quality for lossy encoders (codec defaults: jpeg=75, webp=75, avif=50)
     #[arg(short, long, value_name = "1-100", value_parser = clap::value_parser!(u8).range(1..=100))]
     pub quality: Option<u8>,
+
+    /// Lossless WebP compression
+    #[arg(long)]
+    pub lossless: bool,
 
     /// Resize before encoding: WxH, Wx (auto height) or xH (auto width)
     #[arg(long, value_name = "GEOMETRY")]
     pub resize: Option<Resize>,
+
+    /// Shrink so the longest side is at most PX, preserving aspect ratio
+    #[arg(long, value_name = "PX", conflicts_with = "resize")]
+    pub max_size: Option<u32>,
 
     /// Rotate before encoding
     #[arg(long, value_enum)]
@@ -95,7 +103,7 @@ impl FromStr for Resize {
     }
 }
 
-/// Rotation applied before encoding, like Squoosh's rotate preprocessor.
+/// Rotation applied before encoding.
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum Rotation {
     #[value(name = "90")]
@@ -106,7 +114,7 @@ pub enum Rotation {
     R270,
 }
 
-/// Resampling filters, mirroring Squoosh's resize methods.
+/// Resampling filter used when resizing.
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
 pub enum ResizeFilter {
     Triangle,

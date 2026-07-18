@@ -1,12 +1,14 @@
-//! Output codecs, mirroring Squoosh's encoders with pure-Rust implementations.
+//! Output codecs and their backends.
 //!
-//! | Squoosh  | primage                                            |
-//! |----------|----------------------------------------------------|
-//! | MozJPEG  | `mozjpeg` crate (feature) or pure-Rust baseline    |
-//! | OxiPNG   | `oxipng` crate — the very same code Squoosh builds |
-//! | WebP     | `image-webp` (lossless; lossy not yet in pure Rust)|
-//! | AVIF     | `ravif` + rav1e (pure Rust, replaces libaom WASM)  |
-//! | QOI      | `image` crate                                      |
+//! | Format | Default backend                                  |
+//! |--------|--------------------------------------------------|
+//! | JPEG   | `mozjpeg` crate (pure-Rust baseline fallback)    |
+//! | PNG    | `oxipng`                                         |
+//! | WebP   | `webp` / libwebp (`image-webp` lossless fallback)|
+//! | AVIF   | `ravif` + rav1e (pure Rust)                      |
+//! | QOI    | `image` crate                                    |
+//!
+//! The C codecs (mozjpeg, libwebp) are statically linked into the binary.
 
 use std::path::Path;
 
@@ -17,12 +19,12 @@ use image::{ExtendedColorType, ImageEncoder, RgbaImage};
 /// Output image format.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Format {
-    /// JPEG — MozJPEG with the `mozjpeg` feature, pure-Rust baseline otherwise
+    /// JPEG — MozJPEG with the `mozjpeg` feature (default), pure-Rust baseline otherwise
     #[value(alias = "jpg")]
     Jpeg,
     /// PNG, optimized with OxiPNG
     Png,
-    /// WebP (lossless — a pure-Rust lossy encoder doesn't exist yet)
+    /// WebP — lossy via libwebp (default), or lossless with --lossless
     Webp,
     /// AVIF, encoded with ravif/rav1e
     Avif,
@@ -59,15 +61,17 @@ impl Format {
     }
 }
 
-/// Per-codec encoding options, defaulting to Squoosh's defaults.
+/// Per-codec encoding options.
 pub struct EncodeOptions {
-    /// Lossy quality 1–100 (Squoosh: jpeg=75, avif=50).
+    /// Lossy quality 1–100 (defaults: jpeg=75, webp=75, avif=50).
     pub quality: Option<u8>,
-    /// OxiPNG optimization preset 0–6 (Squoosh: 2).
+    /// Lossless WebP compression.
+    pub lossless: bool,
+    /// OxiPNG optimization preset 0–6 (default: 2).
     pub png_level: u8,
-    /// Interlace (Adam7) PNG output (Squoosh: false).
+    /// Interlace (Adam7) PNG output (default: false).
     pub png_interlace: bool,
-    /// AVIF encoder speed 0–10 (Squoosh: 6).
+    /// AVIF encoder speed 0–10 (default: 6).
     #[cfg_attr(not(feature = "avif"), allow(dead_code))]
     pub avif_speed: u8,
 }
@@ -82,9 +86,9 @@ pub fn encode(img: &RgbaImage, format: Format, opts: &EncodeOptions) -> Result<V
     }
 }
 
-/// Real MozJPEG (the C library Squoosh compiles to WASM), with Squoosh's
-/// default options: progressive scans, optimized Huffman coding, 4:2:0
-/// chroma subsampling (4:4:4 at quality ≥ 90, like mozjpeg's auto_subsample).
+/// Real MozJPEG. Defaults: progressive scans, optimized Huffman coding,
+/// 4:2:0 chroma subsampling (4:4:4 at quality ≥ 90, mozjpeg's
+/// auto_subsample behavior).
 #[cfg(feature = "mozjpeg")]
 fn encode_jpeg(img: &RgbaImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
     let quality = opts.quality.unwrap_or(75);
@@ -135,7 +139,7 @@ fn flatten_alpha(img: &RgbaImage) -> Vec<u8> {
     rgb
 }
 
-/// PNG: fast initial encode, then OxiPNG optimization (same code Squoosh runs).
+/// PNG: fast initial encode, then OxiPNG optimization.
 fn encode_png(img: &RgbaImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
     use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 
@@ -148,13 +152,27 @@ fn encode_png(img: &RgbaImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
     oxipng::optimize_from_memory(&raw, &options).context("oxipng optimization failed")
 }
 
-/// WebP, lossless. Lossy WebP encoding (VP8) is not available in any
-/// pure-Rust crate yet; `image-webp` is expected to gain it eventually.
+/// WebP via libwebp, statically linked. Lossy at quality 75 by default
+/// (libwebp's default method 4), lossless with `--lossless`.
+#[cfg(feature = "libwebp")]
 fn encode_webp(img: &RgbaImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
-    if let Some(q) = opts.quality.filter(|&q| q < 100) {
+    let encoder = webp::Encoder::from_rgba(img.as_raw(), img.width(), img.height());
+    let encoded = if opts.lossless {
+        encoder.encode_lossless()
+    } else {
+        let quality = opts.quality.unwrap_or(75);
+        encoder.encode(f32::from(quality))
+    };
+    Ok(encoded.to_vec())
+}
+
+/// Pure-Rust WebP fallback: lossless only, via `image-webp`. A pure-Rust
+/// lossy (VP8) encoder doesn't exist yet.
+#[cfg(not(feature = "libwebp"))]
+fn encode_webp(img: &RgbaImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
+    if !opts.lossless {
         eprintln!(
-            "warning: lossy WebP (quality {q}) isn't supported by the pure-Rust encoder yet; \
-             encoding lossless instead"
+            "warning: lossy WebP requires the `libwebp` feature; encoding lossless instead"
         );
     }
     let mut out = Vec::new();
@@ -164,9 +182,8 @@ fn encode_webp(img: &RgbaImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// AVIF via ravif (pure-Rust frontend around rav1e) — the modern replacement
-/// for Squoosh's libaom-compiled-to-WASM. Defaults match Squoosh: quality 50,
-/// speed 6.
+/// AVIF via ravif (pure-Rust frontend around rav1e).
+/// Defaults: quality 50, speed 6.
 #[cfg(feature = "avif")]
 fn encode_avif(img: &RgbaImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
     let quality = opts.quality.unwrap_or(50);
@@ -223,6 +240,7 @@ mod tests {
     fn opts() -> EncodeOptions {
         EncodeOptions {
             quality: None,
+            lossless: false,
             png_level: 2,
             png_interlace: false,
             avif_speed: 6,
@@ -244,6 +262,16 @@ mod tests {
     #[test]
     fn webp_roundtrip() {
         let bytes = encode(&test_image(), Format::Webp, &opts()).unwrap();
+        assert_eq!(roundtrip(&bytes), (32, 24));
+    }
+
+    #[test]
+    fn webp_lossless_roundtrip() {
+        let opts = EncodeOptions {
+            lossless: true,
+            ..opts()
+        };
+        let bytes = encode(&test_image(), Format::Webp, &opts).unwrap();
         assert_eq!(roundtrip(&bytes), (32, 24));
     }
 

@@ -32,6 +32,8 @@ pub struct Report {
     pub dimensions: (u32, u32),
     /// Downscaled copy for terminal display, when --preview is set.
     pub image: Option<image::RgbaImage>,
+    /// Explanation when an encoded output cannot be previewed.
+    pub preview_warning: Option<&'static str>,
 }
 
 impl fmt::Display for Report {
@@ -119,17 +121,31 @@ pub fn run(plan: &Plan, args: &Cli, preview_pixel_width: Option<u32>) -> Result<
     };
 
     let dimensions = (img.width(), img.height());
+    let mut encoded_preview = None;
+    let mut preview_warning = None;
 
     let output_size = match (plan.output.as_ref(), plan.format) {
         (Some(output), Some(format)) => {
             let opts = codecs::EncodeOptions {
                 quality: args.quality,
                 lossless: args.lossless,
-                png_level: args.png_level,
+                png_level: args.png_level.unwrap_or(2),
                 png_interlace: args.png_interlace,
-                avif_speed: args.avif_speed,
+                avif_speed: args.avif_speed.unwrap_or(6),
             };
             let bytes = codecs::encode(&img, format, &opts)?;
+
+            if args.preview && preview_pixel_width.is_some() {
+                match decode_encoded_preview(&bytes, format)? {
+                    Some(image) => encoded_preview = Some(image),
+                    None => {
+                        preview_warning = Some(
+                            "encoded AVIF preview is unavailable because AVIF decoding is not \
+                             included; the output file was still written",
+                        );
+                    }
+                }
+            }
 
             if let Some(parent) = output.parent() {
                 std::fs::create_dir_all(parent)
@@ -146,7 +162,14 @@ pub fn run(plan: &Plan, args: &Cli, preview_pixel_width: Option<u32>) -> Result<
     // display the pixels natively instead of resampling a cell-sized placement.
     let image = preview_pixel_width
         .filter(|_| args.preview)
-        .map(|width| transform::fit_width(&img, width, image::imageops::FilterType::Lanczos3));
+        .and_then(|width| {
+            encoded_preview
+                .as_ref()
+                .or_else(|| plan.output.is_none().then_some(&img))
+                .map(|source| {
+                    transform::fit_width(source, width, image::imageops::FilterType::Lanczos3)
+                })
+        });
 
     Ok(Report {
         input: plan.input.clone(),
@@ -155,7 +178,20 @@ pub fn run(plan: &Plan, args: &Cli, preview_pixel_width: Option<u32>) -> Result<
         output_size,
         dimensions,
         image,
+        preview_warning,
     })
+}
+
+/// Decode the bytes that were actually written so lossy artifacts are visible
+/// in the terminal preview. AVIF output is the only exception because this
+/// project does not currently include an AVIF decoder.
+fn decode_encoded_preview(bytes: &[u8], format: Format) -> Result<Option<image::RgbaImage>> {
+    if format == Format::Avif {
+        return Ok(None);
+    }
+    image::load_from_memory(bytes)
+        .context("failed to decode encoded output for preview")
+        .map(|image| Some(image.to_rgba8()))
 }
 
 /// Pick the output format: explicit flag, then the output path's extension,
@@ -194,26 +230,38 @@ fn resolve_output_path(
         .with_context(|| format!("invalid file name: {}", input.display()))?
         .to_string_lossy();
     let ext = format.extension();
+    let default_same_format_number = args.output.is_none()
+        && args.suffix.is_empty()
+        && !args.overwrite
+        && Format::from_path(input) == Some(format);
     let auto_name = |n: Option<u32>| {
+        if default_same_format_number {
+            return format!("{stem}{}.{ext}", n.unwrap_or(1));
+        }
         let counter = n.map(|n| format!("-{n}")).unwrap_or_default();
         format!("{stem}{}{counter}.{ext}", args.suffix)
     };
 
+    let generated_name = match &args.output {
+        Some(out) => args.inputs.len() > 1 || out.is_dir(),
+        None => true,
+    };
     let mut candidate = match &args.output {
         // Multiple inputs, or an existing directory: treat -o as a directory.
         Some(out) if args.inputs.len() > 1 || out.is_dir() => out.join(auto_name(None)),
         Some(out) => out.clone(),
         None => input.with_file_name(auto_name(None)),
     };
-    let mut n = 1;
-    while !taken.insert(candidate.clone()) {
-        n += 1;
+    let mut n = 2;
+    while taken.contains(&candidate) || (generated_name && candidate.exists()) {
         candidate = match &args.output {
             Some(out) if args.inputs.len() > 1 || out.is_dir() => out.join(auto_name(Some(n))),
             Some(out) => out.with_file_name(auto_name(Some(n))),
             None => input.with_file_name(auto_name(Some(n))),
         };
+        n += 1;
     }
+    taken.insert(candidate.clone());
     Ok(candidate)
 }
 
@@ -228,5 +276,66 @@ pub fn human_bytes(n: u64) -> String {
         format!("{n} B")
     } else {
         format!("{size:.1} {}", UNITS[unit])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+    use image::{Rgba, RgbaImage};
+
+    fn args(values: &[&str]) -> Cli {
+        Cli::try_parse_from(values).unwrap()
+    }
+
+    #[test]
+    fn same_format_uses_a_safe_default_number() {
+        let args = args(&["primage", "photo.jpg", "--quality", "60"]);
+        let plan = plan(Path::new("photo.jpg"), &args, &mut HashSet::new()).unwrap();
+        assert_eq!(plan.output.as_deref(), Some(Path::new("photo1.jpg")));
+    }
+
+    #[test]
+    fn explicit_overwrite_keeps_the_input_name() {
+        let args = args(&["primage", "photo.jpg", "--quality", "60", "--overwrite"]);
+        let plan = plan(Path::new("photo.jpg"), &args, &mut HashSet::new()).unwrap();
+        assert_eq!(plan.output.as_deref(), Some(Path::new("photo.jpg")));
+    }
+
+    #[test]
+    fn generated_name_collisions_are_numbered() {
+        let args = args(&["primage", "photo.jpg", "--quality", "60"]);
+        let mut taken = HashSet::from([PathBuf::from("photo1.jpg")]);
+        let plan = plan(Path::new("photo.jpg"), &args, &mut taken).unwrap();
+        assert_eq!(plan.output.as_deref(), Some(Path::new("photo2.jpg")));
+    }
+
+    #[test]
+    fn encoded_jpeg_preview_contains_codec_output() {
+        let source = RgbaImage::from_pixel(16, 16, Rgba([255, 0, 0, 0]));
+        let bytes = codecs::encode(
+            &source,
+            Format::Jpeg,
+            &codecs::EncodeOptions {
+                quality: Some(100),
+                lossless: false,
+                png_level: 2,
+                png_interlace: false,
+                avif_speed: 6,
+            },
+        )
+        .unwrap();
+        let preview = decode_encoded_preview(&bytes, Format::Jpeg)
+            .unwrap()
+            .unwrap();
+        let pixel = preview.get_pixel(8, 8).0;
+        assert!(pixel[0] > 240 && pixel[1] > 240 && pixel[2] > 240);
+        assert_eq!(pixel[3], 255);
+    }
+
+    #[test]
+    fn encoded_avif_preview_is_explicitly_unavailable() {
+        assert!(decode_encoded_preview(&[], Format::Avif).unwrap().is_none());
     }
 }

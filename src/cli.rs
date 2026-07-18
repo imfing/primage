@@ -39,7 +39,12 @@ pub struct Cli {
     pub resize: Option<Resize>,
 
     /// Shrink so the longest side is at most PX, preserving aspect ratio
-    #[arg(long, value_name = "PX", conflicts_with = "resize")]
+    #[arg(
+        long,
+        value_name = "PX",
+        conflicts_with = "resize",
+        value_parser = clap::value_parser!(u32).range(1..)
+    )]
     pub max_size: Option<u32>,
 
     /// Rotate before encoding
@@ -51,16 +56,16 @@ pub struct Cli {
     pub resize_filter: ResizeFilter,
 
     /// OxiPNG optimization level: 0 (fast) .. 6 (slow, smallest)
-    #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u8).range(0..=6))]
-    pub png_level: u8,
+    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=6))]
+    pub png_level: Option<u8>,
 
     /// Write interlaced (Adam7) PNGs
     #[arg(long)]
     pub png_interlace: bool,
 
     /// AVIF encoder speed: 0 (slow, best) .. 10 (fast)
-    #[arg(long, default_value_t = 6, value_parser = clap::value_parser!(u8).range(0..=10))]
-    pub avif_speed: u8,
+    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=10))]
+    pub avif_speed: Option<u8>,
 
     /// Suffix appended to generated file names, e.g. -s .min
     #[arg(short, long, default_value = "")]
@@ -80,7 +85,16 @@ impl Cli {
     /// True when --preview is used without any output options: show the
     /// image instead of writing a file.
     pub fn preview_only(&self) -> bool {
-        self.preview && self.output.is_none() && self.format.is_none() && self.suffix.is_empty()
+        self.preview
+            && self.output.is_none()
+            && self.format.is_none()
+            && self.quality.is_none()
+            && !self.lossless
+            && self.png_level.is_none()
+            && !self.png_interlace
+            && self.avif_speed.is_none()
+            && self.suffix.is_empty()
+            && !self.overwrite
     }
 }
 
@@ -182,5 +196,26 @@ mod tests {
         assert!("0x600".parse::<Resize>().is_err());
         assert!("800".parse::<Resize>().is_err());
         assert!("800x600x1".parse::<Resize>().is_err());
+    }
+
+    #[test]
+    fn max_size_must_be_positive() {
+        assert!(Cli::try_parse_from(["primage", "photo.jpg", "--max-size", "0"]).is_err());
+        let args = Cli::try_parse_from(["primage", "photo.jpg", "--max-size", "1"]).unwrap();
+        assert_eq!(args.max_size, Some(1));
+    }
+
+    #[test]
+    fn encoder_options_turn_preview_into_a_conversion() {
+        let preview = Cli::try_parse_from(["primage", "photo.jpg", "--preview"]).unwrap();
+        assert!(preview.preview_only());
+
+        let quality =
+            Cli::try_parse_from(["primage", "photo.jpg", "--preview", "--quality", "60"]).unwrap();
+        assert!(!quality.preview_only());
+
+        let png_level =
+            Cli::try_parse_from(["primage", "photo.png", "--preview", "--png-level", "4"]).unwrap();
+        assert!(!png_level.preview_only());
     }
 }

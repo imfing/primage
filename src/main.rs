@@ -68,6 +68,9 @@ fn main() -> anyhow::Result<()> {
                     converted += 1;
                 }
                 println!("{report}");
+                if let Some(warning) = report.preview_warning {
+                    eprintln!("{}: warning: {warning}", plan.input.display());
+                }
                 if let Some(img) = &report.image {
                     if let Err(e) = term::display(img) {
                         eprintln!("{}: preview failed: {e:#}", plan.input.display());

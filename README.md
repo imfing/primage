@@ -12,9 +12,9 @@ photo.png → photo.avif  3.3 MB → 44.0 KB  (-98.7%)
 ## Install
 
 ```sh
-cargo build --release          # binary in target/release/primage
+cargo install primage
 # or
-cargo install --path .
+cargo install --path .         # install from a source checkout
 ```
 
 ### Cargo features
@@ -39,7 +39,7 @@ primage [OPTIONS] <INPUT>...
 -q, --quality <1-100>      Lossy quality (defaults: jpeg=75, webp=75, avif=50)
     --lossless             Lossless WebP compression
     --resize <GEOMETRY>    WxH, Wx (auto height), xH (auto width)
-    --max-size <PX>        Shrink so the longest side is at most PX (keeps aspect)
+    --max-size <PX>        Shrink so the longest side is at most PX (minimum: 1)
     --rotate <90|180|270>  Rotate before encoding
     --resize-filter <F>    triangle | catrom | gaussian | lanczos3 | nearest
     --png-level <0-6>      OxiPNG effort (default: 2)
@@ -53,7 +53,7 @@ primage [OPTIONS] <INPUT>...
 Examples:
 
 ```sh
-primage photo.jpg -q 60                        # recompress a JPEG
+primage photo.jpg -q 60                        # writes photo1.jpg
 primage photo.png -f webp                      # PNG → lossy WebP (78 KB from 3.3 MB)
 primage *.png -f avif -o out/                  # batch convert, parallel across cores
 primage big.tiff --max-size 1600 -f jpg -q 80  # TIFF → resized JPEG
@@ -61,19 +61,27 @@ primage scan.png --rotate 90 -f png --png-level 6
 primage icon.png -f webp --lossless            # lossless WebP
 
 primage --preview photo.png                    # just view, writes nothing
-primage photo.png -f avif --preview            # convert, then preview the result
+primage photo.jpg -q 40 --preview              # recompress, then preview encoded JPEG
 ```
 
 ## Terminal previews
 
-`--preview` renders images inline via the [Kitty graphics protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/) — supported by **Ghostty**, kitty, WezTerm and Konsole. Handy for checking results without leaving the terminal:
+On Unix, `--preview` renders images inline via the [Kitty graphics protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/) — supported by **Ghostty**, kitty, WezTerm and Konsole. Handy for checking results without leaving the terminal:
 
 - `primage --preview photo.png` — preview-only mode: decodes, applies any transforms and displays, without writing a file
-- `--preview` combined with `-f`/`-o` converts first, then shows the processed image
+- `--preview` combined with encoder options converts first, then decodes and shows the bytes that were written, including lossy compression artifacts
 
 Preview support is auto-detected from the environment and disabled when stdout isn't a TTY (pipes stay clean).
 primage requires the terminal to report its pixel dimensions so it can prepare
 a native-resolution preview without an additional terminal-side resize.
+Encoded AVIF previews are not available yet because AVIF decoding is not included;
+the AVIF is still written and primage prints a warning instead of showing a
+misleading pre-encoding preview.
+
+When the output format matches the input and neither `-o`, `--suffix` nor
+`--overwrite` is provided, primage adds a number automatically
+(`photo.jpg` → `photo1.jpg`). Existing generated names advance the number
+rather than being overwritten (`photo2.jpg`, `photo3.jpg`, and so on).
 
 Input decoding: JPEG, PNG, WebP, GIF, TIFF, BMP, ICO, TGA, PNM, QOI (8-bit RGBA pipeline).
 
@@ -87,7 +95,7 @@ Input decoding: JPEG, PNG, WebP, GIF, TIFF, BMP, ICO, TGA, PNM, QOI (8-bit RGBA 
 | AVIF | [`ravif`](https://crates.io/crates/ravif) + rav1e (pure Rust) | q50, speed 6 |
 | QOI | [`image`](https://crates.io/crates/image) crate | — |
 
-Not supported yet: JPEG XL (no mature pure-Rust encoder; [`jxl-oxide`](https://crates.io/crates/jxl-oxide) is decode-only), palette quantization.
+Not supported yet: JPEG XL (no mature pure-Rust encoder; [`jxl-oxide`](https://crates.io/crates/jxl-oxide) is decode-only), palette quantization. HEIC/HEIF input decoding is desirable, but currently blocked on a license-compatible, cross-platform backend; HEIC encoding is not planned because of HEVC licensing concerns.
 
 ## Portability
 

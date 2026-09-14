@@ -250,7 +250,9 @@ fn encode_avif(img: &RgbaImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
     let quality = opts.quality.unwrap_or(50);
     let pixels: Vec<ravif::RGBA8> = img
         .as_raw()
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|p| ravif::RGBA8 {
             r: p[0],
             g: p[1],
